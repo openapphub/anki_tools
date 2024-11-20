@@ -1,138 +1,135 @@
 #!/usr/bin/env bash
-#  anki.sh
-#  Created by cdpath on 2018/4/19.
-#  Copyright © 2018 cdpath. All rights reserved.
 
-#set -xeuo pipefail
+# PopClip Environment Variables with fallback values
+CONTENT=${POPCLIP_TEXT:-debug}
+TARGET_DECK=${POPCLIP_OPTION_TARGET_DECK:-"测试::demo::001"}
+NOTE_TYPE=${POPCLIP_OPTION_NOTE_TYPE:-"A-prettify-nord-basic"}
+CONTENT_FIELD=${POPCLIP_OPTION_CONTENT_FIELD:-"Back"}
+DEFAULT_TAGS=${POPCLIP_OPTION_DEFAULT_TAGS:-"popclip"}
+HTML_CONTENT=${POPCLIP_HTML:-""}
 
-
-## PopClip Env
-entry=${POPCLIP_TEXT:-debug}
-safe_entry=${POPCLIP_URLENCODED_TEXT:-debug}
-dict_service=${POPCLIP_OPTION_DICT_SVC:-caiyun}
-target_deck=${POPCLIP_OPTION_TARGET_DECK:-Default}
-note_type=${POPCLIP_OPTION_NOTE_TYPE:-Basic}
-front_field=${POPCLIP_OPTION_FRONT_FIELD:-Front}
-back_field=${POPCLIP_OPTION_BACK_FIELD:-Back}
-source_field=${POPCLIP_OPTION_SOURCE_FIELD:-Source}
-tag=${POPCLIP_OPTION_TAG:-debug}
-app_tag=${POPCLIP_APP_NAME// /_} # replace spaces with underscore
-api_token=${POPCLIP_OPTION_API_TOKEN}
-
-if [[ -z "$POPCLIP_BROWSER_URL" ]]; then
-    browser_source_html=
-else
-    browser_source_html="<a href=\\\"${POPCLIP_BROWSER_URL}\\\">${POPCLIP_BROWSER_TITLE}</a>"
-fi
-
-## Dictionary Services
-_caiyun()
-{
-    local safe_entry=$1
-    url="http://api.interpreter.caiyunai.com/v1/translator"
-    DIRECTION="en2zh"
-    BODY='{"source": ["'$safe_entry'"], "trans_type": "'$DIRECTION'", "replaced": true, "media": "text"}'
- 
-    curl -sSL -XPOST $url \
-         -H 'Content-Type: application/json' \
-         -H "X-Authorization: token $api_token" \
-         -d "$BODY" | python3 -c "import sys, json; print(json.load(sys.stdin)['target'][0])"
-
+# 日志配置
+LOG_FILE="$HOME/popclip_anki_debug.log"
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >> "$LOG_FILE"
 }
 
-_youdao()
-{
-    local safe_entry=$1
-    url="http://dict.youdao.com/m/search?q=$safe_entry"
-    curl -sSL $url \
-    | sed -ne '/网络释义/,/更多释义/p' \
-    | grep '<li>' \
-    | sed -e 's/<[^>]*>//g' \
-    | awk 'ORS="<br>"'
+# JSON 转义函数
+escape_for_json() {
+    local string="$1"
+    string="${string//\\/\\\\}"  # 反斜杠
+    string="${string//\"/\\\"}"  # 双引号
+    string="${string//$/\\$}"    # 美元符号
+    string="${string//	/\\t}"   # 制表符
+    string="${string//
+/\\n}"    # 换行符
+    string="${string///\\/}"    # 正斜杠
+    echo "$string"
 }
 
-look_up()
-{
-    local safe_entry=$1
-    if [ "$dict_service" = "caiyun" ]
-    then
-        definition=$(_caiyun "$safe_entry")
-    elif [ "$dict_service" = "youdao" ]
-    then
-        definition=$(_youdao "$safe_entry")
-    else
-        definition=''
-        echo "API Not Implemented"
-        exit 1
+# 文本处理函数
+format_text() {
+    local text="$CONTENT"
+    local result=""
+    local in_code_block=false
+    local current_block=""
+    local lang=""
+    
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^'```' ]]; then
+            if [ "$in_code_block" = false ]; then
+                in_code_block=true
+                lang=$(echo "$line" | sed -E 's/^```([a-zA-Z]*).*/\1/')
+                [ -z "$lang" ] && lang="plaintext"
+                result+="<pre><code class=\"language-$lang\">"
+                current_block=""
+            else
+                in_code_block=false
+                result+="$current_block</code></pre><br>"
+                current_block=""
+            fi
+        else
+            if [ "$in_code_block" = true ]; then
+                # 在代码块内，保持原始格式
+                if [ -n "$current_block" ]; then
+                    current_block+=$'\n'
+                fi
+                current_block+="$line"
+            else
+                # 在代码块外，仅在非空行添加换行符
+                if [ -n "$line" ]; then
+                    result+="$line<br>"
+                fi
+            fi
+        fi
+    done <<< "$text"
+    
+    # 如果代码块没有正确关闭，确保关闭它
+    if [ "$in_code_block" = true ]; then
+        result+="$current_block</code></pre><br>"
     fi
-
-    if [[ -z "$definition" ]]; then
-        echo "Word Not Found"
-        exit 1
-    else
-        echo $definition
-    fi
+    
+    echo "$result"
 }
 
-
-## AnkiConnect
-gen_post_data()
-{
-    local definition=$1
+# 生成 AnkiConnect 请求数据
+gen_post_data() {
+    local formatted_content
+    formatted_content=$(format_text)
+    formatted_content=$(escape_for_json "$formatted_content")
+    
     cat <<EOF
 {
-  "action": "addNote",
-  "version": 5,
-  "params": {
-    "note": {
-      "fields": {
-        "$front_field": "$entry",
-        "$back_field": "$definition",
-        "$source_field": "$browser_source_html"
-      },
-      "modelName": "$note_type",
-      "deckName": "$target_deck",
-      "tags": [
-        "$tag",
-        "$app_tag"
-      ]
+    "action": "guiAddCards",
+    "version": 6,
+    "params": {
+        "note": {
+            "deckName": "$TARGET_DECK",
+            "modelName": "$NOTE_TYPE",
+            "fields": {
+                "$CONTENT_FIELD": "$formatted_content"
+            },
+            "tags": ["$DEFAULT_TAGS"]
+        }
     }
-  }
 }
 EOF
 }
 
-check_result()
-{
-    local resp=$1
-    local definition=$2
-    if [[ $resp != *'"error": null'* ]]; then
-        if [[ $resp = "null" ]]; then
-            msg="Invalid post data for AnkiConnect"
-        else
-            msg=$(echo "$resp" | perl -pe 's/^.*?(?<="error": ")(.*?[^\\])(?=[\."]).*?$/$1/' | sed -e 's/^"//' -e 's/"$//')
-        fi
-        if [[ -z "$resp" ]]; then
-            msg="Did you open anki?"
-        fi
-        exit 2
-    else
-        exit 0
+# 发送请求到 AnkiConnect
+send_to_anki() {
+    local payload="$1"
+    local response
+    
+    log "Sending request to AnkiConnect..."
+    response=$(curl -s -X POST "localhost:8765" -H "Content-Type: application/json" -d "$payload")
+    
+    if [[ $response == "null" ]]; then
+        log "Error: Failed to connect to AnkiConnect"
+        return 1
+    elif [[ $response != *'"error": null'* ]]; then
+        log "Error: AnkiConnect returned an error"
+        log "Response: $response"
+        return 1
     fi
+    
+    log "Successfully sent to Anki"
+    log "Response: $response"
 }
 
-
-## main
-main()
-{
-    local definition
-    definition=$(look_up $safe_entry) || exit 1
-    payload=$(gen_post_data "$definition")
-    echo $payload >> /Users/jinzi/Developer/anki_tools/log
-    res=$(curl -sX POST -d "$payload" "localhost:8765")
-    check_result "$res" "$definition"
+main() {
+    log "Script started"
+    log "Processing content: $CONTENT"
+    
+    payload=$(gen_post_data)
+    log "Generated payload: $payload"
+    
+    if ! send_to_anki "$payload"; then
+        log "Failed to send to Anki"
+        exit 1
+    fi
+    
+    log "Script finished successfully"
 }
-
 
 main
-
